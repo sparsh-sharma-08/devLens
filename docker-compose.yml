@@ -1,0 +1,107 @@
+services:
+  # ──────────────────────────────────────────────
+  # PostgreSQL 15 + pgvector extension
+  # ──────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: devlens_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-devlens}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devlens_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-devlens}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-devlens}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # Redis 7 — Celery broker + result backend
+  # ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: devlens_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # FastAPI Backend
+  # ──────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: devlens_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-devlens}:${POSTGRES_PASSWORD:-devlens_secret}@postgres:5432/${POSTGRES_DB:-devlens}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - repo_workspaces:/tmp/devlens_repos
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ──────────────────────────────────────────────
+  # Celery Worker — runs all pipeline tasks
+  # ──────────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: devlens_worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-devlens}:${POSTGRES_PASSWORD:-devlens_secret}@postgres:5432/${POSTGRES_DB:-devlens}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - repo_workspaces:/tmp/devlens_repos
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+
+  # ──────────────────────────────────────────────
+  # Nginx reverse proxy (API only in dev)
+  # ──────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: devlens_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/dev.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  repo_workspaces:
