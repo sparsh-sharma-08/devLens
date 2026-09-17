@@ -8,16 +8,20 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status, Query
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, text as sa_text
+
+import structlog
 
 from app.auth.dependencies import CurrentUserId
 from app.database import get_db_context
+
 from app.models import (
     IndexingJob, Repository, HealthReport as HealthReportModel,
-    GraphNode, GraphEdge, StaticAnalysisResult, File
+    GraphNode, GraphEdge, StaticAnalysisResult, File, Embedding
 )
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
+logger = structlog.get_logger(__name__)
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -227,17 +231,20 @@ async def get_health_report(repository_id: uuid.UUID, user_id: CurrentUserId):
                 detail="Health report not yet generated. The repository may still be indexing."
             )
 
-        # Get top issues from static analysis
+        from app.workers.pipeline import _is_non_production_path
+        SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+        # Get top issues from static analysis, sorted by severity hierarchy
         issues_result = await db.execute(
             select(StaticAnalysisResult)
             .where(StaticAnalysisResult.repository_id == repository_id)
-            .order_by(StaticAnalysisResult.severity)
-            .limit(20)
+            .limit(100)
         )
-        issues = issues_result.scalars().all()
+        raw_issues = issues_result.scalars().all()
+        sorted_issues = sorted(raw_issues, key=lambda x: SEV_ORDER.get((x.severity or "").lower(), 5))[:25]
 
         top_issues = []
-        for issue in issues:
+        for issue in sorted_issues:
             # Get the file path
             file_path = ""
             if issue.file_id:
@@ -249,9 +256,11 @@ async def get_health_report(repository_id: uuid.UUID, user_id: CurrentUserId):
             top_issues.append({
                 "severity": issue.severity,
                 "tool": issue.tool,
+                "rule_id": issue.rule_id,
                 "message": issue.message,
                 "file_path": file_path,
                 "line": issue.line or 0,
+                "is_non_production": _is_non_production_path(file_path) if file_path else False,
             })
 
     return {
@@ -259,7 +268,9 @@ async def get_health_report(repository_id: uuid.UUID, user_id: CurrentUserId):
         "complexity_score": report.complexity_score,
         "security_score": report.security_score,
         "duplication_score": report.duplication_score,
+        "code_quality_score": report.duplication_score,  # Alias for duplication_score representing code quality
         "dependency_score": report.dependency_score,
+        "metrics_json": report.metrics_json,
         "top_issues": top_issues,
         "generated_at": report.generated_at.isoformat(),
     }
@@ -393,37 +404,104 @@ async def semantic_search(
     q: str = Query(..., description="Search query"),
     user_id: CurrentUserId = None,
 ):
-    """Search code nodes semantically using keyword matching (FR-5)."""
+    """
+    Semantic code search using pgvector cosine similarity (FR-5).
+
+    Embeds the query with all-MiniLM-L6-v2 and finds the nearest graph
+    nodes by cosine distance in the embeddings table.  Falls back to
+    keyword matching if no embeddings have been generated yet (i.e. the
+    repo is still indexing or embed_task hasn't run).
+    """
     async with get_db_context() as db:
         await _verify_repo_access(db, repository_id, user_id)
 
-        nodes_result = await db.execute(
-            select(GraphNode)
-            .where(GraphNode.repository_id == repository_id)
-            .limit(500)
+        results = None  # set by vector path; None triggers keyword fallback
+
+        # ── Try pgvector similarity search first ──────────────────────────
+        emb_count_result = await db.execute(
+            select(Embedding.id)
+            .where(Embedding.repository_id == repository_id)
+            .limit(1)
         )
-        nodes = nodes_result.scalars().all()
+        has_embeddings = emb_count_result.scalar_one_or_none() is not None
 
-        keywords = set(kw.lower() for kw in q.split() if len(kw) > 2)
-        scored: list[tuple[float, GraphNode]] = []
-        for node in nodes:
-            text = f"{node.name} {node.docstring or ''} {node.qualified_name} {node.signature or ''}".lower()
-            score = sum(1.0 for kw in keywords if kw in text) / max(len(keywords), 1)
-            if score > 0:
-                scored.append((score, node))
+        if has_embeddings:
+            try:
+                from app.embeddings import embed_text
+                query_vec = embed_text(q)  # list[float], length 384
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+                # pgvector operator <=> = cosine distance (0 = identical, 2 = opposite)
+                rows = await db.execute(
+                    sa_text("""
+                        SELECT
+                            gn.id            AS node_id,
+                            gn.name          AS name,
+                            gn.qualified_name AS qualified_name,
+                            gn.node_type     AS node_type,
+                            gn.start_line    AS start_line,
+                            (1 - (e.vector <=> CAST(:qvec AS vector))) AS score
+                        FROM embeddings e
+                        JOIN graph_nodes gn ON gn.id = e.node_id
+                        WHERE e.repository_id = :repo_id
+                        ORDER BY e.vector <=> CAST(:qvec AS vector)
+                        LIMIT 20
+                    """),
+                    {
+                        "repo_id": str(repository_id),
+                        "qvec": "[" + ",".join(str(x) for x in query_vec) + "]",
+                    },
+                )
+                results = [
+                    {
+                        "node_id": str(row.node_id),
+                        "name": row.name,
+                        "file_path": row.qualified_name.split("::")[0] if "::" in row.qualified_name else "",
+                        "node_type": row.node_type,
+                        "line": row.start_line or 0,
+                        "score": round(float(row.score), 4),
+                        "method": "vector",
+                    }
+                    for row in rows
+                ]
+            except Exception as exc:
+                logger.warning(
+                    "Vector search failed, falling back to keyword",
+                    repository_id=str(repository_id),
+                    query=q,
+                    error=str(exc),
+                )
+                results = None  # force keyword fallback below
 
-        results = [
-            {
-                "node_id": str(node.id),
-                "name": node.name,
-                "file_path": node.qualified_name.split("::")[0] if "::" in node.qualified_name else "",
-                "line": node.start_line or 0,
-                "score": round(score, 3),
-            }
-            for score, node in scored[:20]
-        ]
+        if results is None:
+            # ── Keyword fallback (pre-embed, vector failure, or small repo) ─
+            nodes_result = await db.execute(
+                select(GraphNode)
+                .where(GraphNode.repository_id == repository_id)
+                .limit(500)
+            )
+            nodes = nodes_result.scalars().all()
+
+            keywords = set(kw.lower() for kw in q.split() if len(kw) > 2)
+            scored: list[tuple[float, GraphNode]] = []
+            for node in nodes:
+                text = f"{node.name} {node.docstring or ''} {node.qualified_name} {node.signature or ''}".lower()
+                score = sum(1.0 for kw in keywords if kw in text) / max(len(keywords), 1)
+                if score > 0:
+                    scored.append((score, node))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            results = [
+                {
+                    "node_id": str(node.id),
+                    "name": node.name,
+                    "file_path": node.qualified_name.split("::")[0] if "::" in node.qualified_name else "",
+                    "node_type": node.node_type,
+                    "line": node.start_line or 0,
+                    "score": round(score, 3),
+                    "method": "keyword",
+                }
+                for score, node in scored[:20]
+            ]
 
     return {"results": results}
 

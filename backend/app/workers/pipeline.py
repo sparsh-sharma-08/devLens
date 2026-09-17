@@ -19,6 +19,7 @@ from collections import defaultdict
 import hashlib
 import os
 import shutil
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,194 @@ STAGE_PROGRESS = {
     "done": 100,
 }
 
+# ── Stage 6: Static Analysis Constants & Severity Mapping ─────────────────────
+
+# Maximum execution time per static analysis tool CLI process
+STATIC_ANALYSIS_TIMEOUT_SECONDS: int = 90
+
+# Fallback severity for any Ruff rule prefix not explicitly mapped
+DEFAULT_SEVERITY: str = "info"
+
+# 1. Exact-code overrides checked BEFORE prefix matching
+RUFF_EXACT_SEVERITY_OVERRIDES: dict[str, str] = {
+    # Undefined name at runtime -> NameError crash
+    "F821": "high",
+}
+
+# 2. Prefix-based severity mappings (checked after exact-code overrides)
+RUFF_PREFIX_SEVERITY_MAP: list[tuple[str, str]] = [
+    # Critical: Fatal syntax errors & unparseable files
+    ("E9", "critical"),
+    ("PLE", "critical"),
+
+    # High: Security vulnerabilities, async deadlocks, left-in debuggers
+    ("S", "high"),
+    ("ASYNC", "high"),
+    ("T10", "high"),
+
+    # Medium: Probable runtime logic bugs & anti-patterns
+    ("F", "medium"),
+    ("B", "medium"),
+    ("PLW", "medium"),
+    ("TRY", "medium"),
+    ("BLE", "medium"),
+    ("RUF", "medium"),
+    ("C90", "medium"),
+
+    # Low: Performance, code smells, complexity, deprecations
+    ("PERF", "low"),
+    ("SIM", "low"),
+    ("PLR", "low"),
+    ("PLC", "low"),
+    ("C4", "low"),
+    ("UP", "low"),
+    ("ARG", "low"),
+    ("DTZ", "low"),
+    ("PTH", "low"),
+    ("RET", "low"),
+    ("SLF", "low"),
+
+    # Info: Formatting, docstrings, conventions, comments
+    ("E", "info"),
+    ("W", "info"),
+    ("I", "info"),
+    ("D", "info"),
+    ("N", "info"),
+    ("Q", "info"),
+    ("COM", "info"),
+    ("T20", "info"),
+    ("TD", "info"),
+    ("FIX", "info"),
+    ("ERA", "info"),
+    ("FA", "info"),
+    ("INP", "info"),
+    ("TCH", "info"),
+]
+
+# Sorted by descending prefix length once at module load to guarantee longer,
+# more specific prefixes match before shorter ones (e.g. SIM/SLF before S, FA/FIX before F)
+_SORTED_RUFF_PREFIXES: list[tuple[str, str]] = sorted(
+    RUFF_PREFIX_SEVERITY_MAP, key=lambda x: -len(x[0])
+)
+
+BANDIT_SEVERITY_MAP: dict[str, str] = {
+    "HIGH": "high",
+    "MEDIUM": "medium",
+    "LOW": "low",
+}
+
+
+def _map_ruff_severity(code: str | None, unmapped_counter: dict[str, int]) -> str:
+    """
+    Map a Ruff rule code to schema severity ('critical'|'high'|'medium'|'low'|'info').
+    Checks exact-code overrides first, then prefix mapping, defaulting to DEFAULT_SEVERITY.
+    Tracks unmapped rule prefixes for post-validation reporting.
+    """
+    if not code:
+        return DEFAULT_SEVERITY
+
+    # 1. Exact-code override checked first
+    if code in RUFF_EXACT_SEVERITY_OVERRIDES:
+        return RUFF_EXACT_SEVERITY_OVERRIDES[code]
+
+    # 2. Prefix matching using descending-length sorted prefixes
+    for prefix, sev in _SORTED_RUFF_PREFIXES:
+        if code.startswith(prefix):
+            return sev
+
+    # 3. Explicit default fallback
+    prefix_part = "".join(c for c in code if c.isalpha()) or code[:3]
+    unmapped_counter[prefix_part] = unmapped_counter.get(prefix_part, 0) + 1
+    return DEFAULT_SEVERITY
+
+
+def _map_bandit_severity(severity_str: str | None) -> str:
+    """Map Bandit's native severity (LOW/MEDIUM/HIGH) to schema severity."""
+    return BANDIT_SEVERITY_MAP.get((severity_str or "").upper(), "info")
+
+
+def _is_test_path(rel_path: str) -> bool:
+    """Return True if relative file path represents test code or fixtures.
+
+    Matches:
+      - Any path component named 'tests', 'test', or 'testing' (directory names)
+      - Files: test_*.py, *_test.py, conftest.py
+      - Testing utility modules: testing.py, *_testing.py  (e.g. click/testing.py)
+    """
+    p = Path(rel_path)
+    if any(part in ("tests", "test", "testing") for part in p.parts):
+        return True
+    filename = p.name.lower()
+    return (
+        filename.startswith("test_")
+        or filename.endswith("_test.py")
+        or filename == "conftest.py"
+        or filename == "testing.py"
+        or filename.endswith("_testing.py")
+    )
+
+
+def _is_non_production_path(rel_path: str) -> bool:
+    """Return True if relative file path represents tests, developer tooling, examples, or docs.
+
+    Used to guard the hard health-score ceiling from false-positive ship-blocker flags on
+    maintenance scripts, build utilities, doc examples, and test fixtures that are never
+    shipped or executed in production runtime environments.
+    """
+    if _is_test_path(rel_path):
+        return True
+    p = Path(rel_path)
+    return any(part in ("tools", "scripts", "examples", "docs", "benchmarks", "fixtures") for part in p.parts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 7: Health Score & Report Generation Constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Curated subset of rule codes that represent genuine, unambiguous ship-blockers
+# in production code (caps overall_score and security_score to 70)
+CEILING_CRITICAL_RULES: frozenset[str] = frozenset({
+    "B601",  # paramiko shell enabled (direct RCE)
+    "B602",  # subprocess call with shell=True and dynamic arguments
+    "B604",  # function call with shell=True
+    "S602",  # ruff flake8-bandit shell=True
+    "B605",  # start process with a shell
+    "B608",  # hardcoded SQL formatted string (SQL injection)
+    "S608",  # ruff SQL injection
+    "B703",  # django mark_safe with variable (XSS)
+})
+
+# Curated high-severity triggers (caps overall_score and security_score to 85)
+CEILING_HIGH_RULES: frozenset[str] = frozenset({
+    "B501",  # request without certificate verification
+    "B502",  # SSL/TLS use of deprecated unsafe protocol version
+    "B503",  # SSL wrap_socket with deprecated options
+    "B504",  # SSL without version check
+    "B506",  # yaml.load without safe Loader
+    "S506",  # ruff unsafe yaml.load
+    "B612",  # logging config listen socket
+})
+
+# Defect density penalty weights (points deducted per KLOC)
+STAGE7_SEVERITY_WEIGHTS: dict[str, float] = {
+    "critical": 15.0,
+    "high": 6.0,
+    "medium": 2.0,
+    "low": 0.4,
+}
+STAGE7_INFO_WEIGHT: float = 0.02
+STAGE7_INFO_MAX_PENALTY: float = 5.0
+
+STAGE7_SEV_RANK: dict[str, int] = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+    "info": 0,
+}
+
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -49,7 +238,15 @@ STAGE_PROGRESS = {
 
 def _run_async(coro):
     """Run an async coroutine from synchronous Celery task context."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 async def _update_job(job_id: str, stage: str, progress_pct: int, error: str | None = None):
@@ -103,6 +300,9 @@ def clone_task(self, repo_id: str, job_id: str, source_url: str) -> dict:
         settings = get_settings()
 
         workspace_dir = Path(settings.clone_workspace_dir) / repo_id
+        # Clear existing workspace if present (e.g. re-indexing or retry)
+        if workspace_dir.exists():
+            shutil.rmtree(workspace_dir, ignore_errors=True)
         workspace_dir.mkdir(parents=True, exist_ok=True)
 
         import git
@@ -149,6 +349,31 @@ def _count_loc(workspace: Path) -> int:
     except Exception:
         pass
     return total
+
+
+def _cleanup_workspace(workspace: str | Path, log) -> int:
+    """Safely delete the workspace directory and return bytes freed."""
+    p = Path(workspace)
+    if not p.exists():
+        return 0
+    size_bytes = 0
+    try:
+        for f in p.rglob("*"):
+            if f.is_file() and not f.is_symlink():
+                try:
+                    size_bytes += f.stat().st_size
+                except OSError:
+                    pass
+        shutil.rmtree(p, ignore_errors=True)
+        log.info(
+            "Workspace directory cleaned up",
+            path=str(p),
+            freed_bytes=size_bytes,
+            freed_mb=round(size_bytes / (1024 * 1024), 2),
+        )
+    except Exception as exc:
+        log.warning("Failed to clean up workspace directory", path=str(p), error=str(exc))
+    return size_bytes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1213,27 +1438,685 @@ def build_graph_task(self, prev_result: dict) -> dict:
 @celery_app.task(bind=True, max_retries=1)
 def embed_task(self, prev_result: dict) -> dict:
     """
-    Stage 5: Generate embeddings for all graph nodes and doc chunks.
-    Implemented in Sprint 5.
+    Stage 5: Generate vector embeddings for all graph nodes in the repository.
+
+    For each non-external, non-import graph_node we construct an
+    information-rich text snippet (name + qualified_name + signature +
+    docstring) and encode it with sentence-transformers/all-MiniLM-L6-v2.
+    Results are stored in the `embeddings` table (Vector(384)).
+
+    The model is loaded ONCE per Celery worker process via the module-level
+    singleton in app.embeddings — subsequent repos in the same worker
+    reuse the already-loaded model without re-loading from disk.
     """
     job_id = prev_result["job_id"]
-    _run_async(_update_job(job_id, "embedding", STAGE_PROGRESS["embedding"]))
-    return prev_result
+    repo_id = prev_result["repo_id"]
+
+    log = logger.bind(job_id=job_id, repo_id=repo_id, stage="embedding")
+    log.info("Starting embed stage")
+
+    try:
+        _run_async(_update_job(job_id, "embedding", STAGE_PROGRESS["embedding"]))
+        stats = _run_async(_embed_repo(repo_id, log))
+        log.info("Embed stage complete", **stats)
+        return {**prev_result, "embed_stats": stats}
+
+    except Exception as exc:
+        log.error("Embed stage failed", error=str(exc))
+        _run_async(_update_job(job_id, "failed", 0, str(exc)))
+        raise self.retry(exc=exc)
+
+
+async def _embed_repo(repo_id: str, log) -> dict:
+    """
+    Embed all qualifying graph nodes for a repository and persist to DB.
+
+    Strategy:
+    - Load nodes: all node_types EXCEPT 'external' and 'import'
+      (those carry no meaningful code body to embed).
+    - Build text: name + qualified_name + signature + docstring.
+    - Batch encode with all-MiniLM-L6-v2 (batch_size=64).
+    - Delete existing embeddings for this repo (idempotent re-indexing),
+      then bulk-insert new rows.
+
+    Returns a stats dict for logging.
+    """
+    from sqlalchemy import select, delete
+    from app.database import get_db_context
+    from app.models import GraphNode, Embedding
+    from app.embeddings import embed_texts, build_node_embedding_text
+
+    repo_uuid = uuid.UUID(repo_id)
+
+    async with get_db_context() as db:
+        # ── 1. Fetch nodes eligible for embedding ─────────────────────────
+        result = await db.execute(
+            select(GraphNode)
+            .where(
+                GraphNode.repository_id == repo_uuid,
+                GraphNode.node_type.notin_(["external", "import"]),
+            )
+        )
+        nodes: list[GraphNode] = result.scalars().all()
+
+        if not nodes:
+            log.warning("No embeddable nodes found", repo_id=repo_id)
+            return {"nodes_embedded": 0, "nodes_skipped": 0}
+
+        # ── 2. Build text representations ─────────────────────────────────
+        texts: list[str] = []
+        valid_nodes: list[GraphNode] = []
+        skipped = 0
+        for node in nodes:
+            text = build_node_embedding_text(node).strip()
+            if not text:
+                skipped += 1
+                continue
+            texts.append(text)
+            valid_nodes.append(node)
+
+        log.info("Built embedding texts", total=len(texts), skipped=skipped)
+
+        # ── 3. Batch encode ────────────────────────────────────────────────
+        # embed_texts() calls the module-level singleton — model is loaded
+        # once per worker process, not per task invocation.
+        vectors: list[list[float]] = embed_texts(texts, batch_size=64)
+
+        # ── 4. Wipe existing CODE embeddings for this repo (idempotent) ───
+        #    Scoped to source_type="code" so any future non-code embedding
+        #    types (doc chunks, commit summaries, etc.) are not wiped on reindex.
+        await db.execute(
+            delete(Embedding).where(
+                Embedding.repository_id == repo_uuid,
+                Embedding.source_type == "code",
+            )
+        )
+
+        # ── 5. Bulk-insert new embedding rows ─────────────────────────────
+        batch_size = 256
+        inserted = 0
+        for i in range(0, len(valid_nodes), batch_size):
+            chunk_nodes = valid_nodes[i : i + batch_size]
+            chunk_vecs = vectors[i : i + batch_size]
+            chunk_texts = texts[i : i + batch_size]
+            for node, vector, text in zip(chunk_nodes, chunk_vecs, chunk_texts):
+                emb = Embedding(
+                    repository_id=repo_uuid,
+                    node_id=node.id,
+                    source_type="code",
+                    content_excerpt=text[:1000],
+                    vector=vector,
+                )
+                db.add(emb)
+            inserted += len(chunk_nodes)
+            # Flush each batch to avoid one huge ORM flush at commit
+            await db.flush()
+
+        await db.commit()
+
+        return {
+            "nodes_embedded": inserted,
+            "nodes_skipped": skipped,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Task: Static Analysis (Sprint 6)
+# Task: Static Analysis (Stage 6)
 # ─────────────────────────────────────────────────────────────────────────────
+
+async def _run_tool_subprocess(
+    cmd: list[str],
+    cwd: Path,
+    tool_name: str,
+    log: structlog.BoundLogger,
+) -> tuple[str, list[dict]]:
+    """
+    Run a static analysis CLI subprocess via asyncio.create_subprocess_exec.
+    Returns (status, parsed_results) where status is 'ok' | 'timeout' | 'error'.
+    Non-zero exit codes are NOT treated as crashes if parseable JSON is returned.
+    """
+    log.info(f"Running {tool_name} subprocess", command=cmd, cwd=str(cwd))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=STATIC_ANALYSIS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        log.warning(f"{tool_name} subprocess timed out", timeout_seconds=STATIC_ANALYSIS_TIMEOUT_SECONDS)
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return "timeout", []
+    except Exception as exc:
+        log.error(f"{tool_name} subprocess execution failed", error=str(exc))
+        return "error", []
+
+    stdout_str = stdout.decode("utf-8", errors="replace").strip()
+    if not stdout_str:
+        if proc.returncode == 0:
+            return "ok", []
+        log.warning(f"{tool_name} produced empty stdout with non-zero exit", returncode=proc.returncode, stderr=stderr.decode("utf-8", errors="replace")[:500])
+        return "error", []
+
+    import json
+    try:
+        # For Bandit, strip any leading non-JSON output (e.g. progress or headers)
+        if tool_name == "bandit":
+            json_start = stdout_str.find("{")
+            if json_start != -1:
+                payload = json.loads(stdout_str[json_start:])
+                return "ok", payload.get("results", [])
+            return "error", []
+        else:
+            payload = json.loads(stdout_str)
+            if isinstance(payload, list):
+                return "ok", payload
+            return "error", []
+    except Exception as exc:
+        log.warning(f"Failed to parse {tool_name} JSON output", error=str(exc), stdout_sample=stdout_str[:300])
+        return "error", []
+
+
+async def _run_static_analysis(repo_id: str, job_id: str) -> dict:
+    """
+    Execute Ruff and Bandit concurrently against the repository workspace, normalize findings,
+    map paths to files.id (with skip-rather-than-guess on ambiguity), scope-delete
+    prior findings, and batch insert into static_analysis_results.
+    """
+    from app.config import get_settings
+    from app.database import get_db_context
+    from app.models import File, StaticAnalysisResult
+    from sqlalchemy import select, delete
+
+    settings = get_settings()
+    workspace_dir = Path(settings.clone_workspace_dir) / repo_id
+    log = logger.bind(stage="static_analysis", repo_id=repo_id, job_id=job_id)
+
+    repo_uuid = uuid.UUID(repo_id)
+
+    async with get_db_context() as db:
+        # Pre-fetch known files for this repo: {rel_path: file_id}
+        file_rows = await db.execute(
+            select(File.id, File.path).where(File.repository_id == repo_uuid)
+        )
+        file_map: dict[str, uuid.UUID] = {row.path: row.id for row in file_rows}
+
+        # Resolve CLI commands (support system binary or active venv python -m)
+        ruff_bin = shutil.which("ruff") or [sys.executable, "-m", "ruff"]
+        bandit_bin = shutil.which("bandit") or [sys.executable, "-m", "bandit"]
+
+        ruff_cmd = (
+            [ruff_bin, "check", "--isolated", "--output-format=json", str(workspace_dir)]
+            if isinstance(ruff_bin, str)
+            else ruff_bin + ["check", "--isolated", "--output-format=json", str(workspace_dir)]
+        )
+        bandit_cmd = (
+            [bandit_bin, "-r", "-q", "-f", "json", str(workspace_dir)]
+            if isinstance(bandit_bin, str)
+            else bandit_bin + ["-r", "-q", "-f", "json", str(workspace_dir)]
+        )
+
+        # 1. Subprocess execution with error & timeout isolation (concurrent run via asyncio.gather)
+        (ruff_status, ruff_raw), (bandit_status, bandit_raw) = await asyncio.gather(
+            _run_tool_subprocess(ruff_cmd, workspace_dir, "ruff", log),
+            _run_tool_subprocess(bandit_cmd, workspace_dir, "bandit", log),
+        )
+
+        pending_records: list[StaticAnalysisResult] = []
+        unmapped_ruff_prefixes: dict[str, int] = {}
+        analyzed_files: set[str] = set()
+
+        # 2. Process Ruff findings
+        for item in ruff_raw:
+            raw_file = item.get("filename") or ""
+            p = Path(raw_file)
+            rel_path = (
+                p.relative_to(workspace_dir).as_posix()
+                if p.is_absolute() and p.is_relative_to(workspace_dir)
+                else p.as_posix()
+            )
+            analyzed_files.add(rel_path)
+            matched_file_id = file_map.get(rel_path)  # None if outside tracked .py files
+
+            code = item.get("code")
+            sev = _map_ruff_severity(code, unmapped_ruff_prefixes)
+            line = item.get("location", {}).get("row") if item.get("location") else None
+
+            pending_records.append(
+                StaticAnalysisResult(
+                    id=uuid.uuid4(),
+                    repository_id=repo_uuid,
+                    tool="ruff",
+                    file_id=matched_file_id,
+                    line=line,
+                    severity=sev,
+                    rule_id=code,
+                    message=item.get("message") or "",
+                )
+            )
+
+        # Dual-detection tracking: S-rules overlap with Bandit; flagged for Stage 7 health-score weighting
+        # Count true Flake8-Bandit security rules (S followed by digits, e.g. S101, S608; not SIM/SLF)
+        ruff_security_rule_count = sum(
+            1 for item in ruff_raw
+            if (code := item.get("code") or "") and code.startswith("S") and len(code) > 1 and code[1].isdigit()
+        )
+
+        # 3. Process Bandit findings
+        retained_bandit_count = 0
+        for item in bandit_raw:
+            raw_file = item.get("filename") or ""
+            p = Path(raw_file)
+            rel_path = (
+                p.relative_to(workspace_dir).as_posix()
+                if p.is_absolute() and p.is_relative_to(workspace_dir)
+                else p.as_posix()
+            )
+            analyzed_files.add(rel_path)
+
+            test_id = item.get("test_id")
+
+            # Filter out B101 (assert_used) in test files specifically — standard pytest usage,
+            # not a vulnerability; retain B101 in non-test code and non-B101 in test code
+            if test_id == "B101" and _is_test_path(rel_path):
+                continue
+
+            matched_file_id = file_map.get(rel_path)
+            sev = _map_bandit_severity(item.get("issue_severity"))
+            line = item.get("line_number")
+
+            pending_records.append(
+                StaticAnalysisResult(
+                    id=uuid.uuid4(),
+                    repository_id=repo_uuid,
+                    tool="bandit",
+                    file_id=matched_file_id,
+                    line=line,
+                    severity=sev,
+                    rule_id=test_id,
+                    message=item.get("issue_text") or "",
+                )
+            )
+            retained_bandit_count += 1
+
+        if unmapped_ruff_prefixes:
+            log.info("Ruff rule prefixes defaulted to DEFAULT_SEVERITY", unmapped=unmapped_ruff_prefixes)
+
+        # 4. Scoped idempotent delete prior to insertion
+        await db.execute(
+            delete(StaticAnalysisResult).where(
+                StaticAnalysisResult.repository_id == repo_uuid,
+                StaticAnalysisResult.tool.in_(["ruff", "bandit"]),
+            )
+        )
+
+        # 5. Batch insert in chunks of 256
+        BATCH_SIZE = 256
+        for i in range(0, len(pending_records), BATCH_SIZE):
+            for obj in pending_records[i : i + BATCH_SIZE]:
+                db.add(obj)
+            await db.flush()
+
+        await db.commit()
+
+        return {
+            "ruff_issues": len(ruff_raw),
+            "bandit_issues": retained_bandit_count,
+            "ruff_security_rule_count": ruff_security_rule_count,
+            "files_analyzed": len(analyzed_files),
+            "ruff_status": ruff_status,
+            "bandit_status": bandit_status,
+        }
+
 
 @celery_app.task(bind=True, max_retries=1)
 def static_analysis_task(self, prev_result: dict) -> dict:
     """
-    Stage 6: Run Ruff, Bandit, ESLint and store results.
-    Implemented in Sprint 6.
+    Stage 6: Run Ruff and Bandit static analysis CLI tools, map findings,
+    and populate static_analysis_results.
     """
     job_id = prev_result["job_id"]
+    repo_id = prev_result["repo_id"]
+    log = logger.bind(task="static_analysis", repo_id=repo_id, job_id=job_id)
+    log.info("Starting Stage 6: static analysis")
+
     _run_async(_update_job(job_id, "static_analysis", STAGE_PROGRESS["static_analysis"]))
-    return prev_result
+
+    try:
+        stats = _run_async(_run_static_analysis(repo_id, job_id))
+        log.info("Static analysis completed successfully", **stats)
+        prev_result.update(stats)
+        return prev_result
+    except Exception as exc:
+        log.error("Static analysis failed", error=str(exc))
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=30)
+        raise
+
+
+async def _generate_health_report(repo_id: str, job_id: str, prev_result: dict, log) -> dict:
+    """
+    Compute comprehensive repository health scores and write HealthReport row.
+    - Normalizes defect density by KLOC
+    - Proximity-based deduplication of Ruff S-rules and Bandit findings (<= 2 lines)
+    - Code quality scoring (non-security bugs, smells, cosmetic penalty capped at 5 pts)
+    - AST complexity scoring (long functions, large classes)
+    - Graph dependency health scoring (ambiguous call edges, external node load)
+    - Absolute severity ceiling (caps to 70 for critical, 85 for high in production code)
+    - Scoped idempotent replacement in health_reports table
+    """
+    from app.database import get_db_context
+    from app.models import File, GraphNode, HealthReport, StaticAnalysisResult
+    from sqlalchemy import delete, func, select
+
+    repo_uuid = uuid.UUID(repo_id)
+
+    async with get_db_context() as db:
+        # 1. Size normalization (KLOC)
+        total_loc = prev_result.get("total_loc")
+        if not total_loc:
+            loc_res = await db.execute(
+                select(func.coalesce(func.sum(File.loc), 0)).where(
+                    File.repository_id == repo_uuid
+                )
+            )
+            total_loc = loc_res.scalar() or 1000
+        kloc = max(float(total_loc) / 1000.0, 1.0)
+
+        # 2. Fetch all static analysis results with file path
+        findings_stmt = (
+            select(
+                StaticAnalysisResult.tool,
+                StaticAnalysisResult.severity,
+                StaticAnalysisResult.rule_id,
+                StaticAnalysisResult.line,
+                File.path,
+            )
+            .outerjoin(File, StaticAnalysisResult.file_id == File.id)
+            .where(StaticAnalysisResult.repository_id == repo_uuid)
+        )
+        finding_rows = (await db.execute(findings_stmt)).all()
+
+        bandit_findings: list[dict] = []
+        ruff_s_findings: list[dict] = []
+        quality_findings: list[dict] = []
+
+        for tool, sev, rule_id, line, f_path in finding_rows:
+            p_str = f_path or ""
+            sev_str = (sev or "info").lower()
+            code_str = rule_id or ""
+            line_int = line or 0
+
+            if tool == "bandit":
+                bandit_findings.append({
+                    "path": p_str,
+                    "severity": sev_str,
+                    "rule_id": code_str,
+                    "line": line_int,
+                })
+            elif tool == "ruff":
+                # Dual detection: S followed by digits (Flake8-Bandit)
+                if code_str.startswith("S") and len(code_str) > 1 and code_str[1].isdigit():
+                    ruff_s_findings.append({
+                        "path": p_str,
+                        "severity": sev_str,
+                        "rule_id": code_str,
+                        "line": line_int,
+                    })
+                else:
+                    quality_findings.append({
+                        "path": p_str,
+                        "severity": sev_str,
+                        "rule_id": code_str,
+                        "line": line_int,
+                    })
+
+        # Proximity-based dedup: index Bandit findings by path
+        bandit_map: dict[str, list[dict]] = defaultdict(list)
+        for bf in bandit_findings:
+            bandit_map[bf["path"]].append(dict(bf))
+
+        dual_detection_overlaps = 0
+        retained_sec_findings: list[dict] = []
+
+        for rf in ruff_s_findings:
+            r_path = rf["path"]
+            r_line = rf["line"]
+            r_sev = rf["severity"]
+
+            overlap_found = False
+            for bf in bandit_map.get(r_path, []):
+                if abs(bf["line"] - r_line) <= 2:
+                    overlap_found = True
+                    dual_detection_overlaps += 1
+                    # Upgrade severity if Ruff severity rank is higher
+                    if STAGE7_SEV_RANK.get(r_sev, 0) > STAGE7_SEV_RANK.get(bf["severity"], 0):
+                        bf["severity"] = r_sev
+                    break
+
+            if not overlap_found:
+                retained_sec_findings.append(rf)
+
+        # Retain all Bandit findings (with severities potentially upgraded from overlap)
+        for bf_list in bandit_map.values():
+            retained_sec_findings.extend(bf_list)
+
+        # 3. Security Score (0-100)
+        sec_counts = {
+            "critical": sum(1 for f in retained_sec_findings if f["severity"] == "critical"),
+            "high": sum(1 for f in retained_sec_findings if f["severity"] == "high"),
+            "medium": sum(1 for f in retained_sec_findings if f["severity"] == "medium"),
+            "low": sum(1 for f in retained_sec_findings if f["severity"] == "low"),
+        }
+        sec_penalty = (
+            STAGE7_SEVERITY_WEIGHTS["critical"] * sec_counts["critical"]
+            + STAGE7_SEVERITY_WEIGHTS["high"] * sec_counts["high"]
+            + STAGE7_SEVERITY_WEIGHTS["medium"] * sec_counts["medium"]
+            + STAGE7_SEVERITY_WEIGHTS["low"] * sec_counts["low"]
+        ) / kloc
+        raw_security_score = max(0.0, min(100.0, 100.0 - sec_penalty))
+
+        # 4. Code Quality / Maintainability Score (duplication_score)
+        qual_counts = {
+            "critical": sum(1 for f in quality_findings if f["severity"] == "critical"),
+            "high": sum(1 for f in quality_findings if f["severity"] == "high"),
+            "medium": sum(1 for f in quality_findings if f["severity"] == "medium"),
+            "low": sum(1 for f in quality_findings if f["severity"] == "low"),
+            "info": sum(1 for f in quality_findings if f["severity"] == "info"),
+        }
+        info_penalty = min(STAGE7_INFO_MAX_PENALTY, (qual_counts["info"] / kloc) * STAGE7_INFO_WEIGHT)
+        qual_penalty = (
+            (
+                STAGE7_SEVERITY_WEIGHTS["critical"] * qual_counts["critical"]
+                + STAGE7_SEVERITY_WEIGHTS["high"] * qual_counts["high"]
+                + STAGE7_SEVERITY_WEIGHTS["medium"] * qual_counts["medium"]
+                + STAGE7_SEVERITY_WEIGHTS["low"] * qual_counts["low"]
+            )
+            / kloc
+        ) + info_penalty
+        raw_quality_score = max(0.0, min(100.0, 100.0 - qual_penalty))
+
+        # 5. Absolute Ceiling Guard
+        # Check all findings in production code (exempting developer tooling, tests, examples)
+        all_production_findings = [
+            f for f in (retained_sec_findings + quality_findings)
+            if not _is_non_production_path(f["path"])
+        ]
+
+        ceiling_triggered: str | None = None
+        ceiling_rule: str | None = None
+        ceiling_file: str | None = None
+
+        for f in all_production_findings:
+            if f["rule_id"] in CEILING_CRITICAL_RULES:
+                ceiling_triggered = "critical"
+                ceiling_rule = f["rule_id"]
+                ceiling_file = f["path"]
+                break
+
+        if not ceiling_triggered:
+            for f in all_production_findings:
+                if f["rule_id"] in CEILING_HIGH_RULES:
+                    ceiling_triggered = "high"
+                    ceiling_rule = f["rule_id"]
+                    ceiling_file = f["path"]
+                    break
+
+        if ceiling_triggered == "critical":
+            security_score = min(raw_security_score, 70.0)
+        elif ceiling_triggered == "high":
+            security_score = min(raw_security_score, 85.0)
+        else:
+            security_score = raw_security_score
+
+        # 6. AST Complexity Score (0-100)
+        nodes_stmt = select(
+            GraphNode.node_type, GraphNode.start_line, GraphNode.end_line
+        ).where(
+            GraphNode.repository_id == repo_uuid,
+            GraphNode.node_type.in_(["function", "method", "class"]),
+        )
+        node_rows = (await db.execute(nodes_stmt)).all()
+        total_funcs = 0
+        long_funcs = 0
+        total_classes = 0
+        large_classes = 0
+
+        for n_type, start_l, end_l in node_rows:
+            lines = (end_l - start_l + 1) if (start_l is not None and end_l is not None) else 0
+            if n_type in ("function", "method"):
+                total_funcs += 1
+                if lines > 50:
+                    long_funcs += 1
+            elif n_type == "class":
+                total_classes += 1
+                if lines > 300:
+                    large_classes += 1
+
+        func_ratio = (long_funcs / total_funcs) if total_funcs > 0 else 0.0
+        class_ratio = (large_classes / total_classes) if total_classes > 0 else 0.0
+        complexity_score = max(0.0, min(100.0, 100.0 - 20.0 * func_ratio - 15.0 * class_ratio))
+
+        # 7. Architecture & Dependency Health Score (0-100)
+        ext_res = await db.execute(
+            select(func.count()).select_from(GraphNode).where(
+                GraphNode.repository_id == repo_uuid,
+                GraphNode.node_type == "external",
+            )
+        )
+        ext_nodes = ext_res.scalar() or 0
+
+        file_res = await db.execute(
+            select(func.count()).select_from(File).where(File.repository_id == repo_uuid)
+        )
+        file_count = file_res.scalar() or 1
+
+        graph_stats = prev_result.get("graph_stats") or {}
+        edges_ambiguous = graph_stats.get("edges_skipped_ambiguous", 0)
+        edges_inserted = graph_stats.get("edges_inserted", 0)
+
+        ambiguity_ratio = (
+            (edges_ambiguous / (edges_ambiguous + edges_inserted))
+            if (edges_ambiguous + edges_inserted) > 0
+            else 0.0
+        )
+        ext_ratio = (ext_nodes / (file_count * 5.0)) if file_count > 0 else 0.0
+        dependency_score = max(0.0, min(100.0, 100.0 - 25.0 * ambiguity_ratio - 15.0 * ext_ratio))
+
+        # 8. Composite Overall Health Score (0-100)
+        overall_composite = (
+            0.35 * security_score
+            + 0.30 * raw_quality_score
+            + 0.20 * complexity_score
+            + 0.15 * dependency_score
+        )
+        if ceiling_triggered == "critical":
+            overall_score = min(overall_composite, 70.0)
+        elif ceiling_triggered == "high":
+            overall_score = min(overall_composite, 85.0)
+        else:
+            overall_score = overall_composite
+
+        metrics_json = {
+            "kloc": round(kloc, 2),
+            "total_loc": total_loc,
+            "dedup_summary": {
+                "raw_bandit": len(bandit_findings),
+                "raw_ruff_s_rules": len(ruff_s_findings),
+                "dual_detection_overlaps": dual_detection_overlaps,
+                "retained_security_findings": len(retained_sec_findings),
+            },
+            "security": {
+                "raw_score": round(raw_security_score, 2),
+                "final_score": int(round(security_score)),
+                "counts": sec_counts,
+            },
+            "code_quality": {
+                "raw_score": round(raw_quality_score, 2),
+                "final_score": int(round(raw_quality_score)),
+                "info_penalty": round(info_penalty, 2),
+                "counts": qual_counts,
+            },
+            "complexity": {
+                "score": int(round(complexity_score)),
+                "total_functions": total_funcs,
+                "long_functions": long_funcs,
+                "total_classes": total_classes,
+                "large_classes": large_classes,
+            },
+            "dependency": {
+                "score": int(round(dependency_score)),
+                "total_files": file_count,
+                "external_nodes": ext_nodes,
+                "edges_ambiguous": edges_ambiguous,
+                "edges_inserted": edges_inserted,
+            },
+            "ceiling": {
+                "triggered": ceiling_triggered is not None,
+                "level": ceiling_triggered,
+                "trigger_rule": ceiling_rule,
+                "trigger_file": ceiling_file,
+            },
+        }
+
+        # 9. Scoped idempotent delete & persist to health_reports
+        await db.execute(delete(HealthReport).where(HealthReport.repository_id == repo_uuid))
+
+        # Note on DB column naming: The database schema defines this column as `duplication_score`
+        # from an earlier design. In Stage 7, this represents general code quality / maintainability
+        # (non-security logic bugs, code smells, and cosmetic warnings). We store the computed
+        # `code_quality_score` into `HealthReport.duplication_score`.
+        report_row = HealthReport(
+            id=uuid.uuid4(),
+            repository_id=repo_uuid,
+            overall_score=int(round(overall_score)),
+            complexity_score=int(round(complexity_score)),
+            security_score=int(round(security_score)),
+            duplication_score=int(round(raw_quality_score)),
+            dependency_score=int(round(dependency_score)),
+            metrics_json=metrics_json,
+        )
+        db.add(report_row)
+        await db.commit()
+
+        return {
+            "health_report_id": str(report_row.id),
+            "overall_score": int(round(overall_score)),
+            "complexity_score": int(round(complexity_score)),
+            "security_score": int(round(security_score)),
+            "duplication_score": int(round(raw_quality_score)),
+            "code_quality_score": int(round(raw_quality_score)),
+            "dependency_score": int(round(dependency_score)),
+            "metrics_json": metrics_json,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1244,12 +2127,123 @@ def static_analysis_task(self, prev_result: dict) -> dict:
 def report_generation_task(self, prev_result: dict) -> dict:
     """
     Stage 7: Compute Health Score and write health_report record.
-    Implemented in Sprint 6.
     """
     job_id = prev_result["job_id"]
+    repo_id = prev_result["repo_id"]
+    log = logger.bind(task="report_generation", repo_id=repo_id, job_id=job_id)
+    log.info("Starting Stage 7: report generation")
+
     _run_async(_update_job(job_id, "report_generation", STAGE_PROGRESS["report_generation"]))
-    _run_async(_update_job(job_id, "done", 100))
-    return prev_result
+
+    try:
+        scores = _run_async(_generate_health_report(repo_id, job_id, prev_result, log))
+        _run_async(_update_job(job_id, "done", 100))
+        log.info("Report generation stage complete", **{k: v for k, v in scores.items() if k != "metrics_json"})
+
+        # Clean up workspace directory after successful Stage 7 completion
+        from app.config import get_settings
+        settings = get_settings()
+        workspace = prev_result.get("workspace") or str(Path(settings.clone_workspace_dir) / repo_id)
+        freed_bytes = _cleanup_workspace(workspace, log)
+        scores["workspace_freed_bytes"] = freed_bytes
+
+        prev_result.update({"health_scores": scores})
+        return prev_result
+    except Exception as exc:
+        log.error("Report generation stage failed", error=str(exc))
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=30)
+        raise
+
+
+async def _get_latest_job_stage(repo_uuid: uuid.UUID) -> str | None:
+    """Query the most recent indexing job stage for a repository."""
+    from app.database import get_db_context
+    from app.models import IndexingJob
+    from sqlalchemy import select
+
+    async with get_db_context() as db:
+        stmt = (
+            select(IndexingJob.stage)
+            .where(IndexingJob.repository_id == repo_uuid)
+            .order_by(IndexingJob.started_at.desc(), IndexingJob.id.desc())
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+
+@celery_app.task
+def cleanup_stale_workspaces_task(max_age_hours: int = 24) -> dict:
+    """
+    Periodic TTL sweep: delete workspace directories older than `max_age_hours`.
+    Prevents accumulation of orphaned workspaces from crashed or aborted tasks.
+
+    Race-condition guard:
+    Before deleting a workspace directory, query the indexing_jobs table for that
+    repo_id's most recent job and skip deletion if its status is NOT a terminal state
+    (i.e. status is anything other than "done" or "failed" — skip if it's still
+    pending/cloning/parsing/building_graph/embedding/static_analysis). Only delete
+    workspaces whose corresponding job has actually finished (successfully or not)
+    AND is older than the age threshold. If no matching indexing_job row exists at all
+    for a workspace directory (true orphan, e.g. from a deleted repository), it's safe
+    to delete regardless of the job-status check.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+    base_dir = Path(settings.clone_workspace_dir)
+    if not base_dir.exists():
+        return {"cleaned": 0, "total_freed_bytes": 0, "skipped_active": 0}
+
+    import time
+    now = time.time()
+    cutoff = now - (max_age_hours * 3600)
+    cleaned = 0
+    total_freed = 0
+    skipped_active = 0
+    log = logger.bind(task="cleanup_stale_workspaces")
+
+    TERMINAL_STAGES = {"done", "failed"}
+
+    for entry in base_dir.iterdir():
+        if entry.is_dir():
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    # Race-condition guard: check if corresponding repo job is still active
+                    repo_uuid = None
+                    try:
+                        repo_uuid = uuid.UUID(entry.name)
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+
+                    if repo_uuid is not None:
+                        try:
+                            latest_stage = _run_async(_get_latest_job_stage(repo_uuid))
+                        except Exception as db_exc:
+                            log.warning(
+                                "Failed to check indexing job status for workspace; skipping deletion for safety",
+                                repo_id=entry.name,
+                                error=str(db_exc),
+                            )
+                            skipped_active += 1
+                            continue
+
+                        if latest_stage is not None and latest_stage not in TERMINAL_STAGES:
+                            log.info(
+                                "Skipping workspace cleanup for active indexing job",
+                                repo_id=entry.name,
+                                stage=latest_stage,
+                            )
+                            skipped_active += 1
+                            continue
+
+                    freed = _cleanup_workspace(entry, log)
+                    cleaned += 1
+                    total_freed += freed
+            except Exception as exc:
+                log.warning("Error inspecting workspace directory", path=str(entry), error=str(exc))
+
+    return {"cleaned": cleaned, "total_freed_bytes": total_freed, "skipped_active": skipped_active}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

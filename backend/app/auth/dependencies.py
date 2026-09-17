@@ -2,6 +2,8 @@
 DevLens AI — FastAPI Auth Dependency
 Extracts and validates the JWT from the Authorization header.
 """
+from __future__ import annotations
+
 import uuid
 from typing import Annotated
 

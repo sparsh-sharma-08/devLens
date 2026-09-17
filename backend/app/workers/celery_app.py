@@ -27,3 +27,11 @@ celery_app.conf.update(
     task_soft_time_limit=1200,              # 20 min soft limit per task
     task_time_limit=1500,                   # 25 min hard limit
 )
+
+celery_app.conf.beat_schedule = {
+    "cleanup-stale-workspaces-hourly": {
+        "task": "app.workers.pipeline.cleanup_stale_workspaces_task",
+        "schedule": 3600.0,
+        "kwargs": {"max_age_hours": 24},
+    },
+}

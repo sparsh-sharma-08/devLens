@@ -302,18 +302,64 @@ export interface ArchitectureData {
   relationships: { from: string; to: string; type: string }[];
 }
 
+export interface HealthReportMetrics {
+  kloc: number;
+  total_loc: number;
+  dedup_summary: {
+    raw_bandit: number;
+    raw_ruff_s_rules: number;
+    dual_detection_overlaps: number;
+    retained_security_findings: number;
+  };
+  security: {
+    raw_score: number;
+    final_score: number;
+    counts: { critical: number; high: number; medium: number; low: number };
+  };
+  code_quality: {
+    raw_score: number;
+    final_score: number;
+    info_penalty: number;
+    counts: { critical: number; high: number; medium: number; low: number; info: number };
+  };
+  complexity: {
+    score: number;
+    total_functions: number;
+    long_functions: number;
+    total_classes: number;
+    large_classes: number;
+  };
+  dependency: {
+    score: number;
+    total_files: number;
+    external_nodes: number;
+    edges_ambiguous: number;
+    edges_inserted: number;
+  };
+  ceiling: {
+    triggered: boolean;
+    level: "critical" | "high" | null;
+    trigger_rule: string | null;
+    trigger_file: string | null;
+  };
+}
+
 export interface HealthReport {
   overall_score: number;
   complexity_score: number;
   security_score: number;
   duplication_score: number;
+  code_quality_score?: number;
   dependency_score: number;
+  metrics_json?: HealthReportMetrics | null;
   top_issues: {
     severity: string;
     tool: string;
+    rule_id?: string | null;
     message: string;
     file_path: string;
     line: number;
+    is_non_production?: boolean;
   }[];
   generated_at: string;
 }

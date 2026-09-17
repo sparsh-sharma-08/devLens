@@ -8,18 +8,26 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text as sa_text
+
+import structlog
 
 from app.auth.dependencies import CurrentUserId
 from app.config import get_settings
 from app.database import get_db_context
 from app.models import (
     ChatConversation, ChatMessage, Repository,
-    GraphNode,
+    GraphNode, Embedding,
 )
 
 router = APIRouter(tags=["chat"])
+logger = structlog.get_logger(__name__)
 settings = get_settings()
+
+# Minimum cosine similarity for a node to be included in chat context.
+# Nodes below this threshold are near-miss noise (0.23-0.32 in validation)
+# and would mislead the LLM into citing irrelevant code as authoritative context.
+MIN_CONTEXT_SIMILARITY: float = 0.35
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -64,9 +72,63 @@ def _get_groq_client():
 
 async def _fetch_context_nodes(db, repo_id: uuid.UUID, query: str, limit: int = 8) -> list:
     """
-    Simple keyword-based context retrieval.
-    Returns top-N graph nodes matching the query.
+    Retrieve top-N graph nodes most relevant to the query.
+
+    Uses pgvector cosine similarity when embeddings are available;
+    falls back to keyword matching otherwise (or on vector search failure).
+    Vector search failures are logged as warnings — never silently swallowed.
     """
+    # Check if embeddings exist for this repo
+    emb_check = await db.execute(
+        select(Embedding.id)
+        .where(Embedding.repository_id == repo_id)
+        .limit(1)
+    )
+    has_embeddings = emb_check.scalar_one_or_none() is not None
+
+    if has_embeddings:
+        try:
+            from app.embeddings import embed_text
+            query_vec = embed_text(query)  # list[float], length 384
+
+            rows = await db.execute(
+                sa_text("""
+                    SELECT
+                        gn.id            AS id,
+                        gn.name          AS name,
+                        gn.qualified_name AS qualified_name,
+                        gn.node_type     AS node_type,
+                        gn.start_line    AS start_line,
+                        gn.end_line      AS end_line,
+                        gn.signature     AS signature,
+                        gn.docstring     AS docstring,
+                        (1 - (e.vector <=> CAST(:qvec AS vector))) AS score
+                    FROM embeddings e
+                    JOIN graph_nodes gn ON gn.id = e.node_id
+                    WHERE e.repository_id = :repo_id
+                      AND gn.node_type IN ('function', 'class', 'method')
+                    ORDER BY e.vector <=> CAST(:qvec AS vector)
+                    LIMIT :lim
+                """),
+                {
+                    "repo_id": str(repo_id),
+                    "qvec": "[" + ",".join(str(x) for x in query_vec) + "]",
+                    "lim": limit,
+                },
+            )
+            # Filter out any results below the similarity floor to avoid low-confidence noise.
+            # If no nodes clear the floor, returns an empty list rather than poor matches.
+            return [r for r in rows if float(r.score) >= MIN_CONTEXT_SIMILARITY]
+        except Exception as exc:
+            logger.warning(
+                "Vector context retrieval failed, falling back to keyword",
+                repo_id=str(repo_id),
+                query=query,
+                error=str(exc),
+            )
+            # fall through to keyword path below
+
+    # ── Keyword fallback ──────────────────────────────────────────────────
     result = await db.execute(
         select(GraphNode)
         .where(
