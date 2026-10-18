@@ -1,6 +1,5 @@
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING 
 from sentence_transformers import SentenceTransformer
 
 if TYPE_CHECKING:

@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080">
+    <title>DevLens AI — Brag Video</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        background: #050912;
+        color: #f1f5f9;
+        font-family: 'Inter', system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      #root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #050912;
+      }
+
+      .clip {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+      }
+
+      /* ── Shared design tokens ─────────────────────────────── */
+      :root {
+        --bg-base: #050912;
+        --bg-surface: #0d1526;
+        --bg-card: rgba(17, 24, 39, 0.85);
+        --border: rgba(99, 102, 241, 0.15);
+        --border-hover: rgba(99, 102, 241, 0.35);
+        --primary: #6366f1;
+        --primary-light: #818cf8;
+        --accent: #06b6d4;
+        --success: #10b981;
+        --text-primary: #f1f5f9;
+        --text-secondary: #94a3b8;
+        --text-muted: #475569;
+      }
+
+      .gradient-text {
+        background: linear-gradient(135deg, #818cf8, #06b6d4);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      /* ── Mesh background (decorative) ────────────────────── */
+      .mesh-bg {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 80% 80% at 20% 10%, rgba(99, 102, 241, 0.06) 0%, transparent 60%),
+          radial-gradient(ellipse 60% 60% at 80% 80%, rgba(6, 182, 212, 0.04) 0%, transparent 60%);
+        pointer-events: none;
+      }
+
+      /* ── Scene 1: Hook ───────────────────────────────────── */
+      #scene-hook {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+
+      #hook-line1 {
+        font-size: 72px;
+        font-weight: 900;
+        letter-spacing: -0.04em;
+        line-height: 1.1;
+        text-align: center;
+        color: #f1f5f9;
+        opacity: 0;
+      }
+
+      #hook-line2 {
+        font-size: 64px;
+        font-weight: 900;
+        letter-spacing: -0.04em;
+        line-height: 1.1;
+        text-align: center;
+        margin-top: 16px;
+        opacity: 0;
+      }
+
+      /* ── Scene 2: Pipeline ───────────────────────────────── */
+      #scene-pipeline {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .pipeline-card {
+        width: 680px;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 40px 48px;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 40px rgba(99, 102, 241, 0.08);
+        opacity: 0;
+      }
+
+      .pipeline-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: rgb(117, 128, 143);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 32px;
+      }
+
+      .pipeline-stage {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 0;
+        border-bottom: 1px solid rgba(99, 102, 241, 0.06);
+        opacity: 0;
+      }
+
+      .pipeline-stage:last-of-type { border-bottom: none; }
+
+      .stage-check {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+
+      .stage-check svg {
+        width: 14px;
+        height: 14px;
+        stroke: white;
+        stroke-width: 3;
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .stage-label {
+        font-size: 18px;
+        font-weight: 500;
+        color: var(--text-primary);
+      }
+
+      .pipeline-complete {
+        margin-top: 24px;
+        padding-top: 20px;
+        border-top: 1px solid rgba(99, 102, 241, 0.1);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        opacity: 0;
+      }
+
+      .complete-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--success);
+      }
+
+      .complete-text {
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--success);
+      }
+
+      .pipeline-progress-bar {
+        width: 100%;
+        height: 3px;
+        background: rgba(99, 102, 241, 0.08);
+        border-radius: 2px;
+        margin-top: 20px;
+        overflow: hidden;
+      }
+
+      .pipeline-progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--primary), var(--accent));
+        border-radius: 2px;
+      }
+
+      /* ── Scene 3: Chat ───────────────────────────────────── */
+      #scene-chat {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 160px;
+      }
+
+      .chat-container {
+        width: 100%;
+        max-width: 880px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+      }
+
+      .chat-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+        opacity: 0;
+      }
+
+      .chat-header-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, var(--accent), #0891b2);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .chat-header-text {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-secondary);
+      }
+
+      .user-msg {
+        display: flex;
+        justify-content: flex-end;
+        opacity: 0;
+      }
+
+      .user-bubble {
+        max-width: 560px;
+        padding: 16px 22px;
+        border-radius: 18px 4px 18px 18px;
+        background: linear-gradient(135deg, #6366f1, #4f46e5);
+        font-size: 17px;
+        font-weight: 500;
+        line-height: 1.5;
+        color: white;
+      }
+
+      .bot-msg {
+        display: flex;
+        gap: 14px;
+        opacity: 0;
+      }
+
+      .bot-avatar {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, var(--accent), #0891b2);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        margin-top: 2px;
+      }
+
+      .bot-avatar svg {
+        width: 16px;
+        height: 16px;
+        fill: white;
+      }
+
+      .bot-bubble {
+        max-width: 640px;
+        padding: 18px 22px;
+        border-radius: 4px 18px 18px 18px;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        font-size: 15px;
+        line-height: 1.7;
+        color: var(--text-primary);
+      }
+
+      .bot-bubble code {
+        background: rgba(99, 102, 241, 0.1);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.85em;
+        color: #a5b4fc;
+      }
+
+      .citations-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+
+      .citation-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 12px;
+        background: rgba(99, 102, 241, 0.1);
+        border: 1px solid rgba(99, 102, 241, 0.25);
+        border-radius: 8px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 13px;
+        font-weight: 500;
+        color: #818cf8;
+        opacity: 0;
+      }
+
+      .citation-chip svg {
+        width: 12px;
+        height: 12px;
+        stroke: #818cf8;
+        fill: none;
+        stroke-width: 2;
+      }
+
+      /* ── Scene 4: Tabs ───────────────────────────────────── */
+      #scene-tabs {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 32px;
+      }
+
+      .tabs-bar {
+        display: flex;
+        gap: 0;
+        background: rgba(5, 9, 18, 0.7);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 4px;
+        opacity: 0;
+      }
+
+      .tab-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 24px;
+        border-radius: 8px;
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-muted);
+        transition: none;
+      }
+
+      .tab-item svg {
+        width: 16px;
+        height: 16px;
+        stroke-width: 2;
+        fill: none;
+      }
+
+      .tab-active {
+        background: rgba(99, 102, 241, 0.12);
+        color: #818cf8;
+      }
+
+      .tab-active svg {
+        stroke: #818cf8;
+      }
+
+      .tabs-preview-row {
+        display: flex;
+        gap: 24px;
+        align-items: flex-start;
+        opacity: 0;
+      }
+
+      .mini-arch {
+        width: 440px;
+        height: 200px;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .mini-arch-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      .mini-arch-nodes {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        flex: 1;
+      }
+
+      .arch-node {
+        width: 80px;
+        height: 56px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 600;
+        color: white;
+      }
+
+      .arch-edge {
+        width: 40px;
+        height: 2px;
+        background: rgba(99, 102, 241, 0.3);
+        position: relative;
+      }
+
+      .arch-edge::after {
+        content: '';
+        position: absolute;
+        right: -4px;
+        top: -3px;
+        width: 0;
+        height: 0;
+        border-left: 6px solid rgba(99, 102, 241, 0.4);
+        border-top: 4px solid transparent;
+        border-bottom: 4px solid transparent;
+      }
+
+      .health-gauge-box {
+        width: 200px;
+        height: 200px;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      }
+
+      .health-score-text {
+        font-size: 48px;
+        font-weight: 900;
+        color: var(--success);
+        line-height: 1;
+      }
+
+      .health-score-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-muted);
+        margin-top: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      /* ── Scene 5: Outro ──────────────────────────────────── */
+      #scene-outro {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 24px;
+      }
+
+      #outro-line1 {
+        font-size: 64px;
+        font-weight: 900;
+        letter-spacing: -0.04em;
+        line-height: 1.15;
+        text-align: center;
+        color: #f1f5f9;
+        opacity: 0;
+      }
+
+      #outro-line2 {
+        font-size: 64px;
+        font-weight: 900;
+        letter-spacing: -0.04em;
+        line-height: 1.15;
+        text-align: center;
+        opacity: 0;
+      }
+
+      .logo-mark {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-top: 16px;
+        opacity: 0;
+      }
+
+      .logo-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 11px;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .logo-icon svg {
+        width: 24px;
+        height: 24px;
+        stroke: white;
+        fill: none;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .logo-name {
+        font-size: 32px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        color: #f1f5f9;
+      }
+
+      .logo-name span {
+        background: linear-gradient(135deg, #818cf8, #06b6d4);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      /* ── Card glow animation target ──────────────────────── */
+      .card-glow {
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 40px rgba(99, 102, 241, 0.08);
+      }
+    </style>
+  </head>
+  <body>
+    <div data-hf-id="hf-at0g" id="root" data-composition-id="main" data-start="0" data-width="1920" data-height="1080" data-duration="20">
+      <!-- ═══ Scene 1: Hook (0–3s) ═══ -->
+      <section data-hf-id="hf-tv2l" id="scene-hook" class="clip" data-start="0" data-duration="3">
+        <div data-hf-id="hf-i6k9" class="mesh-bg"></div>
+        <div data-hf-id="hf-jg3y" id="hook-line1">50,000 lines of code.</div>
+        <div data-hf-id="hf-qa7y" id="hook-line2" class="gradient-text">Where do you even start?</div>
+      </section>
+
+      <!-- ═══ Scene 2: Pipeline (3–8s) ═══ -->
+      <section data-hf-id="hf-5r2j" id="scene-pipeline" class="clip" data-start="3" data-duration="5">
+        <div data-hf-id="hf-zm31" class="mesh-bg"></div>
+        <div data-hf-id="hf-masg" class="pipeline-card card-glow" id="pipeline-card">
+          <div data-hf-id="hf-w927" class="pipeline-title">Indexing Pipeline</div>
+
+          <div data-hf-id="hf-r2er" class="pipeline-stage" id="stage-1">
+            <div data-hf-id="hf-5gm9" class="stage-check">
+              <svg data-hf-id="hf-ulu9" viewBox="0 0 24 24"><polyline data-hf-id="hf-mlxs" points="20 6 9 17 4 12" /></svg>
+            </div>
+            <div data-hf-id="hf-as4t" class="stage-label">Cloning repository…</div>
+          </div>
+
+          <div data-hf-id="hf-ieiw" class="pipeline-stage" id="stage-2">
+            <div data-hf-id="hf-4yut" class="stage-check">
+              <svg data-hf-id="hf-1tol" viewBox="0 0 24 24"><polyline data-hf-id="hf-tizs" points="20 6 9 17 4 12" /></svg>
+            </div>
+            <div data-hf-id="hf-5mll" class="stage-label">Parsing source files…</div>
+          </div>
+
+          <div data-hf-id="hf-j66p" class="pipeline-stage" id="stage-3">
+            <div data-hf-id="hf-65rw" class="stage-check">
+              <svg data-hf-id="hf-30lo" viewBox="0 0 24 24"><polyline data-hf-id="hf-sc2p" points="20 6 9 17 4 12" /></svg>
+            </div>
+            <div data-hf-id="hf-xran" class="stage-label">Building knowledge graph…</div>
+          </div>
+
+          <div data-hf-id="hf-8ap2" class="pipeline-stage" id="stage-4">
+            <div data-hf-id="hf-5rgv" class="stage-check">
+              <svg data-hf-id="hf-2man" viewBox="0 0 24 24"><polyline data-hf-id="hf-sqdq" points="20 6 9 17 4 12" /></svg>
+            </div>
+            <div data-hf-id="hf-812f" class="stage-label">Generating embeddings…</div>
+          </div>
+
+          <div data-hf-id="hf-jx02" class="pipeline-complete" id="pipeline-complete">
+            <div data-hf-id="hf-l5sn" class="complete-dot"></div>
+            <div data-hf-id="hf-xihh" class="complete-text">Indexing complete!</div>
+          </div>
+
+          <div data-hf-id="hf-bwue" class="pipeline-progress-bar">
+            <div data-hf-id="hf-6zg3" class="pipeline-progress-fill" id="progress-fill"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Scene 3: Chat (8–15s) ═══ -->
+      <section data-hf-id="hf-qzu6" id="scene-chat" class="clip" data-start="8" data-duration="7">
+        <div data-hf-id="hf-0t04" class="mesh-bg"></div>
+        <div data-hf-id="hf-597g" class="chat-container">
+          <div data-hf-id="hf-tkoi" class="chat-header" id="chat-header">
+            <div data-hf-id="hf-lu3y" class="chat-header-icon">
+              <svg data-hf-id="hf-ki8s" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path data-hf-id="hf-a6uk" d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+            </div>
+            <div data-hf-id="hf-mwhi" class="chat-header-text">Grounded AI Chat</div>
+          </div>
+
+          <div data-hf-id="hf-mova" class="user-msg" id="user-msg">
+            <div data-hf-id="hf-9xui" class="user-bubble">Where is authentication handled?</div>
+          </div>
+
+          <div data-hf-id="hf-sruk" class="bot-msg" id="bot-msg">
+            <div data-hf-id="hf-72er" class="bot-avatar">
+              <svg data-hf-id="hf-3t7q" viewBox="0 0 24 24"><circle data-hf-id="hf-2731" cx="12" cy="12" r="3" /><path data-hf-id="hf-q3pq" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" opacity="0.3" /></svg>
+            </div>
+            <div data-hf-id="hf-yeow">
+              <div data-hf-id="hf-4675" class="bot-bubble">
+                Authentication is handled through a <strong data-hf-id="hf-hrxd">triple-provider system</strong> in the auth module. It supports <code data-hf-id="hf-2bm0">GitHub OAuth</code>, <code data-hf-id="hf-1hq8">Google OAuth</code>, and <code data-hf-id="hf-lo0c">email/password</code> with bcrypt hashing. JWT access and refresh tokens manage sessions, with automatic token rotation on expiry.
+              </div>
+              <div data-hf-id="hf-lonx" class="citations-row">
+                <div data-hf-id="hf-8qsu" class="citation-chip" id="cite-1">
+                  <svg data-hf-id="hf-b4xt" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><polyline data-hf-id="hf-wnf8" points="16 18 22 12 16 6" /><polyline data-hf-id="hf-9tmw" points="8 6 2 12 8 18" /></svg>
+                  auth.py:42
+                </div>
+                <div data-hf-id="hf-g5qr" class="citation-chip" id="cite-2">
+                  <svg data-hf-id="hf-axud" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><polyline data-hf-id="hf-5ajw" points="16 18 22 12 16 6" /><polyline data-hf-id="hf-u08w" points="8 6 2 12 8 18" /></svg>
+                  models.py:132
+                </div>
+                <div data-hf-id="hf-lnya" class="citation-chip" id="cite-3">
+                  <svg data-hf-id="hf-c4rg" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><polyline data-hf-id="hf-43mt" points="16 18 22 12 16 6" /><polyline data-hf-id="hf-stbt" points="8 6 2 12 8 18" /></svg>
+                  middleware.py:15
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Scene 4: Tabs (15–17s) ═══ -->
+      <section data-hf-id="hf-afqx" id="scene-tabs" class="clip" data-start="15" data-duration="2">
+        <div data-hf-id="hf-0ep3" class="mesh-bg"></div>
+        <div data-hf-id="hf-du1q" class="tabs-bar" id="tabs-bar">
+          <div data-hf-id="hf-ay0l" class="tab-item tab-active" id="tab-chat">
+            <svg data-hf-id="hf-u6pa" viewBox="0 0 24 24" stroke="currentColor"><path data-hf-id="hf-9cck" d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+            Chat
+          </div>
+          <div data-hf-id="hf-kn6w" class="tab-item" id="tab-arch">
+            <svg data-hf-id="hf-vhiq" viewBox="0 0 24 24" stroke="currentColor"><circle data-hf-id="hf-rd6p" cx="12" cy="5" r="3" /><line data-hf-id="hf-fcxp" x1="12" y1="8" x2="12" y2="14" /><circle data-hf-id="hf-4y9d" cx="6" cy="19" r="3" /><circle data-hf-id="hf-8p0c" cx="18" cy="19" r="3" /><line data-hf-id="hf-84m7" x1="12" y1="14" x2="6" y2="16" /><line data-hf-id="hf-9oia" x1="12" y1="14" x2="18" y2="16" /></svg>
+            Architecture
+          </div>
+          <div data-hf-id="hf-1gjb" class="tab-item" id="tab-trace">
+            <svg data-hf-id="hf-vvtr" viewBox="0 0 24 24" stroke="currentColor"><line data-hf-id="hf-3wyt" x1="6" y1="3" x2="6" y2="15" /><circle data-hf-id="hf-2ycg" cx="18" cy="6" r="3" /><circle data-hf-id="hf-2o6c" cx="6" cy="18" r="3" /><path data-hf-id="hf-jpfc" d="M18 9a9 9 0 0 1-9 9" /></svg>
+            Trace
+          </div>
+          <div data-hf-id="hf-k67v" class="tab-item" id="tab-health">
+            <svg data-hf-id="hf-wa4s" viewBox="0 0 24 24" stroke="currentColor"><line data-hf-id="hf-viqb" x1="18" y1="20" x2="18" y2="10" /><line data-hf-id="hf-f4w4" x1="12" y1="20" x2="12" y2="4" /><line data-hf-id="hf-797h" x1="6" y1="20" x2="6" y2="14" /></svg>
+            Health Report
+          </div>
+        </div>
+
+        <div data-hf-id="hf-cel1" class="tabs-preview-row" id="tabs-preview">
+          <div data-hf-id="hf-jphe" class="mini-arch">
+            <div data-hf-id="hf-duzo" class="mini-arch-title">Architecture</div>
+            <div data-hf-id="hf-tsvm" class="mini-arch-nodes">
+              <div data-hf-id="hf-lknu" class="arch-node" style="background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.3);">Frontend</div>
+              <div data-hf-id="hf-x4b2" class="arch-edge"></div>
+              <div data-hf-id="hf-3oe6" class="arch-node" style="background: rgba(6, 182, 212, 0.2); border: 1px solid rgba(6, 182, 212, 0.3);">API</div>
+              <div data-hf-id="hf-47bm" class="arch-edge"></div>
+              <div data-hf-id="hf-nbq2" class="arch-node" style="background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.3);">Worker</div>
+              <div data-hf-id="hf-4lmn" class="arch-edge"></div>
+              <div data-hf-id="hf-s1a0" class="arch-node" style="background: rgba(167, 139, 250, 0.2); border: 1px solid rgba(167, 139, 250, 0.3);">DB</div>
+            </div>
+          </div>
+          <div data-hf-id="hf-ulxo" class="health-gauge-box">
+            <div data-hf-id="hf-h3h8" class="health-score-text">87</div>
+            <div data-hf-id="hf-ou1q" class="health-score-label">Health Score</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Scene 5: Outro (17–20s) ═══ -->
+      <section data-hf-id="hf-919j" id="scene-outro" class="clip" data-start="17" data-duration="3">
+        <div data-hf-id="hf-1lm6" class="mesh-bg"></div>
+        <div data-hf-id="hf-2miu" id="outro-line1">Understand any codebase</div>
+        <div data-hf-id="hf-sbkw" id="outro-line2" class="gradient-text">in 15 minutes.</div>
+        <div data-hf-id="hf-ck5k" class="logo-mark" id="logo-mark">
+          <div data-hf-id="hf-qtgx" class="logo-icon">
+            <svg data-hf-id="hf-3ewp" viewBox="0 0 24 24">
+              <polygon data-hf-id="hf-oz1e" points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+            </svg>
+          </div>
+          <div data-hf-id="hf-0wf4" class="logo-name">Dev<span data-hf-id="hf-68dd">Lens</span> AI</div>
+        </div>
+      </section>
+
+      <!-- ═══ Audio ═══ -->
+      <audio data-hf-id="hf-1383" id="bg-music" data-start="0" data-duration="20" data-track-index="10" data-volume="0.30" data-fade-in="0.5" data-fade-out="1.5" src="assets/music/happy-beats-business-moves-vol-12-by-ende-dot-app.mp3"></audio>
+
+      <!-- SFX: Pipeline stage completions -->
+      <audio data-hf-id="hf-hmwg" id="sfx-stage1" data-start="4.39" data-duration="0.11" data-track-index="11" data-volume="0.55" src="assets/sfx/interface/drop_001.ogg"></audio>
+      <audio data-hf-id="hf-hb6j" id="sfx-stage2" data-start="5.34" data-duration="0.19" data-track-index="12" data-volume="0.55" src="assets/sfx/interface/drop_002.ogg"></audio>
+      <audio data-hf-id="hf-3ox8" id="sfx-stage3" data-start="6.00" data-duration="0.19" data-track-index="13" data-volume="0.55" src="assets/sfx/interface/drop_003.ogg"></audio>
+      <audio data-hf-id="hf-taev" id="sfx-stage4" data-start="6.56" data-duration="0.11" data-track-index="14" data-volume="0.55" src="assets/sfx/interface/drop_001.ogg"></audio>
+
+      <!-- SFX: Citation reveal -->
+      <audio data-hf-id="hf-1t1m" id="sfx-cite" data-start="11.46" data-duration="0.19" data-track-index="15" data-volume="0.60" src="assets/sfx/impact/impactSoft_medium_001.ogg"></audio>
+
+      <!-- SFX: Outro tagline landing -->
+      <!-- beat-locked: 17.47s -->
+      <audio data-hf-id="hf-416j" id="sfx-outro" data-start="17.47" data-duration="1.5" data-track-index="16" data-volume="0.65" src="assets/sfx/impact/impactBell_heavy_000.ogg"></audio>
+    </div>
+
+    <script>
+      document.fonts.ready.then(() => {
+        const tl = gsap.timeline({ paused: true });
+
+        // ═══ Scene 1: Hook (0–3s) ═══
+
+        // "50,000 lines of code." fades up
+        tl.fromTo("#hook-line1",
+          { y: 30, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.6, ease: "power3.out" },
+          0.3
+        );
+
+        // "Where do you even start?" fades up
+        tl.fromTo("#hook-line2",
+          { y: 30, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.6, ease: "power3.out" },
+          1.0
+        );
+
+        // Fade out hook
+        tl.to("#hook-line1", { opacity: 0, duration: 0.4, ease: "power2.in" }, 2.4);
+        tl.to("#hook-line2", { opacity: 0, duration: 0.4, ease: "power2.in" }, 2.4);
+
+        // ═══ Scene 2: Pipeline (3–8s) ═══
+
+        // Card appears
+        tl.fromTo("#pipeline-card",
+          { y: 40, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.5, ease: "power3.out" },
+          3.2
+        );
+
+        // Progress bar starts filling
+        tl.fromTo("#progress-fill",
+          { width: "0%" },
+          { width: "100%", duration: 3.2, ease: "power1.inOut" },
+          3.8
+        );
+
+        // Stages appear one by one
+        // beat-grid: stage 1 at 4.39s, stage 2 at 5.34s, stage 3 at 6.00s, stage 4 at 6.56s
+        tl.fromTo("#stage-1",
+          { x: -20, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.35, ease: "power2.out" },
+          4.39
+        );
+        tl.fromTo("#stage-2",
+          { x: -20, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.35, ease: "power2.out" },
+          5.34
+        );
+        tl.fromTo("#stage-3",
+          { x: -20, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.35, ease: "power2.out" },
+          6.00
+        );
+        tl.fromTo("#stage-4",
+          { x: -20, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.35, ease: "power2.out" },
+          6.56
+        );
+
+        // "Indexing complete!" pops in
+        tl.fromTo("#pipeline-complete",
+          { y: 10, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.3, ease: "power2.out" },
+          7.1
+        );
+
+        // Card fades out
+        tl.to("#pipeline-card", { opacity: 0, y: -20, duration: 0.4, ease: "power2.in" }, 7.5);
+
+        // ═══ Scene 3: Chat (8–15s) ═══
+
+        // Chat header
+        tl.fromTo("#chat-header",
+          { y: 20, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.4, ease: "power3.out" },
+          8.2
+        );
+
+        // User message slides in
+        tl.fromTo("#user-msg",
+          { x: 40, opacity: 0 },
+          { x: 0, opacity: 1, duration: 0.4, ease: "power3.out" },
+          8.6
+        );
+
+        // Bot response fades in
+        tl.fromTo("#bot-msg",
+          { y: 20, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.5, ease: "power3.out" },
+          9.6
+        );
+
+        // Citation chips pop in one by one
+        // beat-grid: cite 1 at 11.46s, cite 2 at 12.02s, cite 3 at 12.55s
+        tl.fromTo("#cite-1",
+          { scale: 0.7, opacity: 0 },
+          { scale: 1, opacity: 1, duration: 0.25, ease: "back.out(1.7)" },
+          11.46
+        );
+        tl.fromTo("#cite-2",
+          { scale: 0.7, opacity: 0 },
+          { scale: 1, opacity: 1, duration: 0.25, ease: "back.out(1.7)" },
+          12.02
+        );
+        tl.fromTo("#cite-3",
+          { scale: 0.7, opacity: 0 },
+          { scale: 1, opacity: 1, duration: 0.25, ease: "back.out(1.7)" },
+          12.55
+        );
+
+        // Chat fades out
+        tl.to(".chat-container", { opacity: 0, y: -20, duration: 0.4, ease: "power2.in" }, 14.4);
+
+        // ═══ Scene 4: Tabs (15–17s) ═══
+
+        // Tab bar fades in
+        tl.fromTo("#tabs-bar",
+          { y: 20, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.35, ease: "power3.out" },
+          15.1
+        );
+
+        // Preview row fades in
+        tl.fromTo("#tabs-preview",
+          { y: 20, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.35, ease: "power3.out" },
+          15.4
+        );
+
+        // Highlight sweep across tabs
+        tl.to("#tab-arch", { color: "#818cf8", duration: 0.15 }, 15.6);
+        tl.to("#tab-arch", { color: "#475569", duration: 0.15 }, 15.85);
+        tl.to("#tab-trace", { color: "#a78bfa", duration: 0.15 }, 15.85);
+        tl.to("#tab-trace", { color: "#475569", duration: 0.15 }, 16.1);
+        tl.to("#tab-health", { color: "#fbbf24", duration: 0.15 }, 16.1);
+        tl.to("#tab-health", { color: "#475569", duration: 0.15 }, 16.35);
+
+        // Tabs fade out
+        tl.to("#tabs-bar", { opacity: 0, duration: 0.3, ease: "power2.in" }, 16.6);
+        tl.to("#tabs-preview", { opacity: 0, duration: 0.3, ease: "power2.in" }, 16.6);
+
+        // ═══ Scene 5: Outro (17–20s) ═══
+
+        // Tagline lands — beat-locked: 17.47s
+        tl.fromTo("#outro-line1",
+          { y: 30, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.5, ease: "power3.out" },
+          17.3
+        );
+        tl.fromTo("#outro-line2",
+          { y: 30, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.5, ease: "power3.out" },
+          17.6
+        );
+
+        // Logo fades up
+        tl.fromTo("#logo-mark",
+          { y: 16, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.5, ease: "power3.out" },
+          18.3
+        );
+
+        window.__timelines["main"] = tl;
+      });
+    </script>
+  </body>
+</html>

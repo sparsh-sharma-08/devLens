@@ -39,4 +39,10 @@ async def get_job_status(job_id: uuid.UUID, user_id: CurrentUserId):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    return JobStatusOut.model_validate(job)
+    return JobStatusOut(
+        job_id=job.id,
+        repository_id=job.repository_id,
+        stage=job.stage,
+        progress_pct=job.progress_pct,
+        error_message=job.error_message,
+    )

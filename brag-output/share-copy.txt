@@ -1,0 +1,2 @@
+Introducing DevLens AI: paste a GitHub URL, get a knowledge graph, and ask anything about your codebase — every answer cites the exact file and line.
+Built with Next.js, FastAPI, Tree-sitter, and pgvector. Understand any repo in 15 minutes.

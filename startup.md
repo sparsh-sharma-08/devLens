@@ -1,321 +1,163 @@
-# DevLens AI — Startup Guide
+# DevLens AI — Startup & Manual Testing Guide
 
-> Complete instructions to get DevLens running locally on your machine.
-
----
-
-## Prerequisites
-
-Make sure the following are installed before proceeding:
-
-| Tool | Version | Check command |
-|---|---|---|
-| **Docker** & **Docker Compose** | Docker ≥ 24, Compose V2 | `docker --version` / `docker compose version` |
-| **Node.js** | ≥ 18 (LTS recommended) | `node --version` |
-| **npm** | ≥ 9 | `npm --version` |
-| **Python** | ≥ 3.12 | `python3 --version` |
-| **Git** | ≥ 2.x | `git --version` |
+> Complete, step-by-step instructions to get DevLens running locally and test all features end-to-end.
 
 ---
 
-## 1. Clone the Repository
+## ⚡ Quick Start (Start Everything in 2 Commands)
+
+The backend and background workers run in Docker; the frontend Next.js development server runs on your host machine.
+
+### Step 1: Start Backend Services (Docker)
+
+From the project root:
 
 ```bash
-git clone <your-repo-url> DevLens
-cd DevLens
+docker compose up -d
 ```
+
+This launches all background services in detached mode:
+* `devlens_postgres` (port `5432`): PostgreSQL 15 with `pgvector`
+* `devlens_redis` (port `6379`): Redis 7 task broker & results backend
+* `devlens_api` (port `8000`): FastAPI application with automatic table creation & hot reload
+* `devlens_worker`: Distributed Celery worker executing Stages 1–7 of the analysis pipeline
+* `devlens_nginx` (port `80`): Reverse proxy
+
+*Verify backend health:*
+```bash
+curl http://localhost:8000/health
+# Response: {"status":"ok","version":"1.0.0"}
+```
+
+### Step 2: Start Frontend Application
+
+In a new terminal window:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The Next.js UI is now accessible at **[http://localhost:3000](http://localhost:3000)**.
 
 ---
 
-## 2. Environment Setup
+## 🧪 Manual Testing Walkthrough
 
-### 2.1 — Root `.env` (Backend + Docker services)
+Follow these steps to manually verify the full end-to-end user journey:
 
-Copy the example env file and fill in your secrets:
+### 1. Authentication
+1. Open **[http://localhost:3000/auth](http://localhost:3000/auth)** in your browser.
+2. Either create a new account or log in with the pre-registered testing user:
+   * **Email:** `test@devlens.ai`
+   * **Password:** `SecurePassword123!`
+3. You will be redirected to the main dashboard at **[http://localhost:3000/dashboard](http://localhost:3000/dashboard)**.
 
+### 2. View or Import a Repository
+* **Pre-Indexed Repository:** Click on the `encode/httpx` repository card already in your dashboard.
+* **Import a New Repository:**
+  1. Click **"Import Repository"** or paste a public GitHub URL in the input bar (e.g. `https://github.com/pallets/click` or `https://github.com/encode/httpx`).
+  2. Watch the live progress bar transition through the 7 Celery pipeline stages:
+     * *Stage 1:* Cloning (5%)
+     * *Stage 2:* Detecting language & inventory (15%)
+     * *Stage 3:* AST parsing (30%)
+     * *Stage 4:* Building graph edges (50%)
+     * *Stage 5:* Generating vector embeddings (70%)
+     * *Stage 6:* Multi-tool static analysis (85%)
+     * *Stage 7:* Health report generation & workspace cleanup (100%)
+
+### 3. Explore the 4 Analysis Tabs
+Once indexing completes, click into the repository to test each tab:
+
+* **🏥 Health Tab:**
+  * Displays the overall health score (e.g., **94 / 100** for HTTPX).
+  * Shows radar breakdown: Security (**97**), Code Quality (**94**), Complexity (**99**), and Dependencies (**77**).
+  * Verifies **Ceiling: NONE** (no false positive caps).
+  * Lists real categorized issues sorted by severity with line numbers.
+* **🏛️ Architecture Tab:**
+  * Renders an interactive Mermaid diagram representing module-level components and dependencies derived from real AST `imports`, `calls`, and `extends` edges.
+* **🔍 Trace Tab:**
+  * Enter an execution intent such as `"HTTP request dispatch"` and click **Trace**.
+  * Confirms semantic entry-point discovery via vector embeddings (`httpx/_api.py:request`) and multi-hop call traversal through `httpx/_client.py:Client` and `BaseClient` with lifecycle role tags.
+* **💬 Chat Tab:**
+  * Ask technical questions about the codebase (e.g. *"How does HTTPX send an asynchronous request?"*).
+  * The system performs vector similarity search over code chunks and streams a detailed explanation with clickable citation chips (`file_path#Lline`).
+
+---
+
+## 🛠️ Environment Configuration
+
+### Root `.env` (Backend & Docker)
+Copy `.env.example` to `.env` if not already present:
 ```bash
 cp .env.example .env
 ```
+Key configuration values:
+```ini
+ENVIRONMENT=development
+DATABASE_URL=postgresql+asyncpg://devlens:devlens_secret@postgres:5432/devlens
+REDIS_URL=redis://redis:6379/0
+CELERY_BROKER_URL=redis://redis:6379/0
+CELERY_RESULT_BACKEND=redis://redis:6379/1
 
-Open `.env` and configure at minimum:
-
-| Variable | What to do |
-|---|---|
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | Register an OAuth App at [GitHub Developer Settings](https://github.com/settings/developers). Set the callback URL to `http://localhost:8000/auth/github/callback` |
-| `JWT_SECRET_KEY` | Replace with a long random string (e.g. `openssl rand -hex 32`) |
-| `GROQ_API_KEY` | Get a free key from [console.groq.com](https://console.groq.com) |
-
-Everything else has sensible defaults for local development.
-
-### 2.2 — Frontend `.env.local`
-
-The frontend env file is already set up at `frontend/.env.local`:
-
+# LLM Provider
+LLM_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=qwen/qwen3.8-27b
 ```
+
+### Frontend `.env.local`
+Located at `frontend/.env.local`:
+```ini
 NEXT_PUBLIC_API_URL=http://localhost:8000/v1
 ```
 
-No changes needed for local development.
-
 ---
 
-## 3. Start with Docker (Recommended)
+## 📜 Useful Management Commands
 
-This is the easiest way — one command spins up **all** services.
-
-### 3.1 — Build and start all services
-
+### Docker Controls
 ```bash
-docker compose up --build
-```
+# Check status of all containers
+docker compose ps
 
-Add `-d` to run in detached (background) mode:
-
-```bash
-docker compose up --build -d
-```
-
-### 3.2 — What gets started
-
-| Service | Container | Port | Description |
-|---|---|---|---|
-| PostgreSQL 15 + pgvector | `devlens_postgres` | `5432` | Database with vector extension |
-| Redis 7 | `devlens_redis` | `6379` | Celery broker + result backend |
-| FastAPI Backend | `devlens_api` | `8000` | REST API with hot-reload |
-| Celery Worker | `devlens_worker` | — | Background pipeline tasks |
-| Nginx | `devlens_nginx` | `80` | Reverse proxy for API |
-
-### 3.3 — Start the frontend (separately)
-
-The frontend (Next.js) runs outside Docker:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### 3.4 — Verify everything is running
-
-| Check | URL / Command |
-|---|---|
-| API Health | [http://localhost:8000/health](http://localhost:8000/health) |
-| API Docs (Swagger) | [http://localhost:8000/docs](http://localhost:8000/docs) |
-| Frontend | [http://localhost:3000](http://localhost:3000) |
-| Nginx proxy | [http://localhost/health](http://localhost/health) |
-| Docker containers | `docker compose ps` |
-
----
-
-## 4. Start Without Docker (Manual Setup)
-
-If you prefer to run services natively:
-
-### 4.1 — Start PostgreSQL & Redis
-
-You'll need PostgreSQL 15 (with pgvector) and Redis 7 running locally. For macOS:
-
-```bash
-# Install via Homebrew
-brew install postgresql@15 redis
-
-# Start services
-brew services start postgresql@15
-brew services start redis
-```
-
-Make sure to install the `pgvector` extension:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-```
-
-Run the init script to set up the database:
-
-```bash
-psql -U devlens -d devlens -f backend/db/init.sql
-```
-
-### 4.2 — Backend
-
-```bash
-cd backend
-
-# Create a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install --upgrade pip setuptools wheel
-pip install -e ".[dev]"
-
-# Run database migrations
-alembic upgrade head
-
-# Start the API server (with hot-reload)
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-### 4.3 — Celery Worker
-
-In a separate terminal (with the venv activated):
-
-```bash
-cd backend
-source .venv/bin/activate
-
-celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
-```
-
-### 4.4 — Frontend
-
-In another terminal:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
----
-
-## 5. Database Migrations (Alembic)
-
-Migrations are managed with Alembic from the `backend/` directory.
-
-```bash
-cd backend
-
-# Apply all pending migrations
-alembic upgrade head
-
-# Create a new migration after model changes
-alembic revision --autogenerate -m "describe your change"
-
-# Rollback the last migration
-alembic downgrade -1
-
-# View current migration status
-alembic current
-```
-
-> **Note:** When using Docker, run Alembic inside the API container:
-> ```bash
-> docker compose exec api alembic upgrade head
-> ```
-
----
-
-## 6. Common Commands
-
-### Docker
-
-```bash
-# Start all services
-docker compose up --build -d
-
-# Stop all services
-docker compose down
-
-# Stop and remove volumes (⚠️ deletes database data)
-docker compose down -v
-
-# View logs for a specific service
-docker compose logs -f api
+# View live Celery worker pipeline logs
 docker compose logs -f worker
-docker compose logs -f postgres
 
-# Restart a single service
-docker compose restart api
+# View live FastAPI logs
+docker compose logs -f api
 
-# Open a shell inside the API container
-docker compose exec api bash
+# Restart backend services
+docker compose restart api worker
+
+# Shut down all services
+docker compose down
 ```
 
-### Frontend
-
+### Database Inspection
 ```bash
-cd frontend
+# 1. Direct one-liner from terminal to check latest indexing jobs:
+docker exec devlens_postgres psql -U devlens -d devlens -c "SELECT id, stage, progress_pct, error_message FROM indexing_jobs ORDER BY started_at DESC LIMIT 5;"
 
-npm run dev        # Development server (port 3000)
-npm run build      # Production build
-npm run start      # Start production server
-npm run lint       # Run ESLint
-```
+# 2. Direct one-liner to view all repositories and their status:
+docker exec devlens_postgres psql -U devlens -d devlens -c "SELECT name, status, last_indexed_at FROM repositories ORDER BY created_at DESC;"
 
-### Backend
-
-```bash
-cd backend
-source .venv/bin/activate
-
-# Run tests
-pytest
-
-# Run linter
-ruff check .
-
-# Run security analysis
-bandit -r app/
+# 3. Or enter interactive psql shell:
+docker exec -it devlens_postgres psql -U devlens -d devlens
+# (Once inside psql, you can run \dt, SQL queries, and type \q to exit)
 ```
 
 ---
 
-## 7. Service URLs (Quick Reference)
+## 🌐 Quick Reference URLs
 
 | Service | URL |
 |---|---|
-| Frontend (Next.js) | http://localhost:3000 |
-| Backend API | http://localhost:8000 |
-| API Docs (Swagger) | http://localhost:8000/docs |
-| Health Check | http://localhost:8000/health |
-| Nginx Proxy | http://localhost:80 |
-| PostgreSQL | localhost:5432 |
-| Redis | localhost:6379 |
-
----
-
-## 8. Troubleshooting
-
-### Port already in use
-
-```bash
-# Find what's using a port (e.g. 8000)
-lsof -i :8000
-
-# Kill the process
-kill -9 <PID>
-```
-
-### Docker containers won't start
-
-```bash
-# Check container logs
-docker compose logs
-
-# Rebuild from scratch
-docker compose down -v
-docker compose up --build
-```
-
-### Database connection refused
-
-- Make sure PostgreSQL is running and healthy: `docker compose ps`
-- Verify `DATABASE_URL` in your `.env` matches the running Postgres instance
-- If running without Docker, ensure the local Postgres user and database exist:
-  ```bash
-  createuser devlens
-  createdb -O devlens devlens
-  ```
-
-### Frontend can't reach the API
-
-- Ensure the backend is running on port `8000`
-- Check that `NEXT_PUBLIC_API_URL=http://localhost:8000/v1` is set in `frontend/.env.local`
-- The Next.js config proxies `/api/*` requests to the backend automatically
-
-### Celery worker not processing tasks
-
-- Check Redis is running: `redis-cli ping` (should return `PONG`)
-- Check worker logs: `docker compose logs -f worker`
-- Ensure `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` are correctly set in `.env`
+| **Frontend Web App** | [http://localhost:3000](http://localhost:3000) |
+| **User Authentication** | [http://localhost:3000/auth](http://localhost:3000/auth) |
+| **Repository Dashboard** | [http://localhost:3000/dashboard](http://localhost:3000/dashboard) |
+| **Backend API Docs (Swagger)** | [http://localhost:8000/docs](http://localhost:8000/docs) |
+| **Backend Health Check** | [http://localhost:8000/health](http://localhost:8000/health) |
+| **PostgreSQL Port** | `localhost:5432` |
+| **Redis Port** | `localhost:6379` |

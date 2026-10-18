@@ -298,8 +298,8 @@ export interface TraceResult {
 }
 
 export interface ArchitectureData {
-  components: { id: string; label: string; files: string[] }[];
-  relationships: { from: string; to: string; type: string }[];
+  components: { id: string; label: string; files: string[]; type?: string; fileCount?: number }[];
+  relationships: { from: string; to: string; type: string; weight?: number }[];
 }
 
 export interface HealthReportMetrics {

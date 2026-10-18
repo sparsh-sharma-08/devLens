@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # ── LLM ──────────────────────────────────────────────────────────────────
     llm_provider: Literal["groq", "claude", "openai", "ollama"] = "groq"
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "qwen/qwen3.8-27b"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # ── Repository Processing ────────────────────────────────────────────────
     max_repo_size_mb: int = 500
-    max_repo_loc: int = 50_000
+    max_repo_loc: int = 500_000
     clone_workspace_dir: str = "/tmp/devlens_repos"
 
     # ── API ───────────────────────────────────────────────────────────────────

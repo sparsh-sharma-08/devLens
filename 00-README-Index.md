@@ -2,7 +2,7 @@
 
 **"Understand any codebase in 15 minutes."**
 
-This package contains the complete, refined planning documentation for DevLens AI, scoped as a solo-developer, zero-budget MVP with a clear path to the full original vision.
+This package contains the complete, refined planning documentation for DevLens AI, scoped as a solo-developer, zero-budget MVP with a clear path to the full original vision. For project setup, quick start, and architecture overviews, see the main [README.md](README.md).
 
 ## Documents in This Package
 

@@ -13,6 +13,16 @@ settings = get_settings()
 logger = structlog.get_logger(__name__)
 
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from app.database import engine
+    from app.models import Base
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -21,6 +31,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs" if settings.environment == "development" else None,
     redoc_url="/redoc" if settings.environment == "development" else None,
+    lifespan=lifespan,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
