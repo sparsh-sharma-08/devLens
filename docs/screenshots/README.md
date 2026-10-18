@@ -7,6 +7,7 @@ This directory contains visual assets and screenshots referenced in the root [`R
 | Filename | Description | Status |
 |---|---|---|
 | `hero-banner.jpg` | High-resolution visual identity header and tagline banner (1920x1080) | ✅ Present |
+| `devlens-demo.mp4` | 20-second 1080p product launch video (copy of `brag-output/brag.mp4`) | ✅ Present |
 | `dashboard.png` | Repository dashboard with repository cards, health ratings, and import trigger | 📷 To capture |
 | `import-pipeline.png` | Live 7-stage Celery indexing pipeline progress modal (5% -> 100%) | 📷 To capture |
 | `repo-health.png` | 4-pillar health report gauges, ceiling verification, and security findings table | 📷 To capture |

@@ -22,11 +22,18 @@
 [**Quick Start**](#-getting-started) &bull;
 [**Architecture**](#-architecture--workflows) &bull;
 [**API Reference**](06-API-Specification.md) &bull;
+[**Watch Demo**](#-product-demo-video) &bull;
 [**Roadmap**](#-roadmap)
 
 <br />
 
-<img src="docs/screenshots/hero-banner.jpg" alt="DevLens AI — Understand any codebase in 15 minutes" width="100%" />
+<video src="brag-output/brag.mp4" width="100%" controls="controls" poster="docs/screenshots/hero-banner.jpg">
+  <img src="docs/screenshots/hero-banner.jpg" alt="DevLens AI — Understand any codebase in 15 minutes" width="100%" />
+</video>
+
+<p align="center">
+  <em>🎬 <a href="brag-output/brag.mp4"><strong>Watch the DevLens AI Launch Video (brag-output/brag.mp4)</strong></a></em>
+</p>
 
 </div>
 
@@ -124,6 +131,19 @@ Explore the core user interface of DevLens AI:
     </td>
   </tr>
 </table>
+
+### 🎬 Product Demo Video
+
+Experience DevLens AI in action — parsing an unfamiliar codebase, constructing the Knowledge Graph, and answering complex architectural questions with exact line-level citations:
+
+https://github.com/sparsh-sharma-08/devLens/raw/master/brag-output/brag.mp4
+
+<div align="center">
+  <video src="brag-output/brag.mp4" width="100%" controls="controls" poster="docs/screenshots/hero-banner.jpg"></video>
+  <p align="center">
+    <em>▶️ <strong><a href="brag-output/brag.mp4">Open or Download brag-output/brag.mp4</a></strong> (1080p 60fps HD Launch Video &bull; 20s)</em>
+  </p>
+</div>
 
 > [!TIP]
 > High-resolution gallery templates and step-by-step instructions for adding custom screenshots are documented in [`docs/screenshots/README.md`](docs/screenshots/README.md).
